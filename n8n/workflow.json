@@ -1,0 +1,175 @@
+{
+  "name": "TaskFlow AI - Resumen semanal",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "triggerAtDay": [1],
+              "triggerAtHour": 8,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "id": "11111111-1111-4111-8111-111111111111",
+      "name": "Schedule Trigger semanal",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-360, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/weekly_digest",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "select",
+              "value": "user_id,email,tasks"
+            },
+            { "name": "order", "value": "user_id.asc" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": { "response": { "response": { "responseFormat": "json" } } }
+      },
+      "id": "22222222-2222-4222-8222-222222222222",
+      "name": "Consultar Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-140, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normaliza las tareas de cada usuario y prepara el prompt para OpenAI.\nconst PRIORITY_WEIGHT = { alta: 0, media: 1, baja: 2 };\nconst reference = new Date();\nconst referenceDate = reference.toISOString().slice(0, 10);\n\nconst SYSTEM_PROMPT = `Eres el asistente de productividad de TaskFlow AI.\\nAnalizas la lista semanal de tareas de una persona y devuelves un resumen accionable en espanol neutro.\\n\\nReglas:\\n1. Usa unicamente los datos entregados; nunca inventes tareas, fechas ni categorias.\\n2. \"pending_count\" es el numero de tareas con estado \"pendiente\".\\n3. \"overdue_count\" es el numero de tareas pendientes cuya fecha limite ya paso respecto a la fecha de referencia.\\n4. \"suggested_priorities\" contiene entre 1 y 3 tareas pendientes ordenadas por urgencia real. Cada elemento usa el titulo exacto de la tarea y una razon de maximo 140 caracteres.\\n5. \"recommendation\" es un unico consejo semanal concreto, de maximo 280 caracteres.\\n6. \"overview\" resume la situacion en 2 frases como maximo.\\n7. Responde exclusivamente con JSON valido: {\"pending_count\":number,\"overdue_count\":number,\"overview\":string,\"suggested_priorities\":[{\"title\":string,\"reason\":string}],\"recommendation\":string}`;\n\nconst rows = items.flatMap((item) => (Array.isArray(item.json) ? item.json : [item.json]));\nconst output = [];\n\nfor (const row of rows) {\n  if (!row || !row.user_id) continue;\n  const user = { user_id: row.user_id, email: row.email, tasks: row.tasks || [] };\n  const pending = user.tasks.filter((task) => task.status === 'pendiente');\n  const overdue = pending.filter((task) => task.due_date && task.due_date < referenceDate);\n\n  const ranked = [...pending].sort((a, b) => {\n    const byPriority = PRIORITY_WEIGHT[a.priority] - PRIORITY_WEIGHT[b.priority];\n    if (byPriority !== 0) return byPriority;\n    if (a.due_date && b.due_date) return a.due_date.localeCompare(b.due_date);\n    if (a.due_date) return -1;\n    if (b.due_date) return 1;\n    return String(a.created_at).localeCompare(String(b.created_at));\n  });\n\n  const payload = {\n    reference_date: referenceDate,\n    totals: { total: user.tasks.length, pending: pending.length, overdue: overdue.length },\n    tasks: ranked.map((task) => ({\n      title: task.title,\n      description: task.description,\n      category: task.category || 'Sin categoria',\n      priority: task.priority,\n      due_date: task.due_date,\n      status: task.status,\n      overdue: Boolean(task.due_date && task.due_date < referenceDate),\n    })),\n  };\n\n  output.push({\n    json: {\n      user_id: user.user_id,\n      email: user.email,\n      reference_date: referenceDate,\n      has_tasks: user.tasks.length > 0,\n      pending_count: pending.length,\n      overdue_count: overdue.length,\n      messages: [\n        { role: 'system', content: SYSTEM_PROMPT },\n        {\n          role: 'user',\n          content: 'Genera el resumen semanal con estos datos:\\n' + JSON.stringify(payload, null, 2),\n        },\n      ],\n    },\n  });\n}\n\nreturn output;"
+      },
+      "id": "33333333-3333-4333-8333-333333333333",
+      "name": "Procesar tareas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [80, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "version": 2 },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "has-tasks",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true },
+              "leftValue": "={{ $json.has_tasks }}",
+              "rightValue": ""
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "44444444-4444-4444-8444-444444444444",
+      "name": "¿Tiene tareas?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [300, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.OPENAI_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OPENAI_MODEL || 'gpt-4o-mini', temperature: 0.2, response_format: { type: 'json_object' }, messages: $json.messages }) }}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "55555555-5555-4555-8555-555555555555",
+      "name": "Enviar a OpenAI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [540, -120]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Valida la respuesta de la IA, recalcula los contadores y arma el correo HTML.\nconst results = [];\n\nfor (let index = 0; index < items.length; index += 1) {\n  const source = $('Procesar tareas');\n  const context = (source.itemMatching ? source.itemMatching(index) : source.all()[index]).json;\n  const content = items[index].json.choices?.[0]?.message?.content;\n\n  let summary;\n  try {\n    summary = JSON.parse(content);\n  } catch (error) {\n    throw new Error('La IA devolvio un JSON invalido para ' + context.email);\n  }\n\n  const priorities = Array.isArray(summary.suggested_priorities)\n    ? summary.suggested_priorities.slice(0, 3)\n    : [];\n\n  const prioritiesHtml = priorities.length\n    ? '<ol>' +\n      priorities\n        .map((item) => '<li><strong>' + item.title + '</strong><br/>' + item.reason + '</li>')\n        .join('') +\n      '</ol>'\n    : '<p>Sin prioridades pendientes.</p>';\n\n  const html = `<div style=\"font-family:system-ui,sans-serif;max-width:560px;color:#1f2024\">\n  <h2 style=\"margin-bottom:4px\">Tu resumen semanal · TaskFlow AI</h2>\n  <p style=\"color:#6b6f76;margin-top:0\">Semana del ${context.reference_date}</p>\n  <p><strong>${context.pending_count}</strong> tareas pendientes · <strong style=\"color:#dc2626\">${context.overdue_count}</strong> vencidas</p>\n  <h3>Panorama</h3>\n  <p>${summary.overview}</p>\n  <h3>Prioridades sugeridas</h3>\n  ${prioritiesHtml}\n  <h3>Recomendacion de la semana</h3>\n  <p>${summary.recommendation}</p>\n</div>`;\n\n  results.push({\n    json: {\n      email: context.email,\n      subject: 'Tu resumen semanal de TaskFlow AI',\n      html,\n    },\n  });\n}\n\nreturn results;"
+      },
+      "id": "66666666-6666-4666-8666-666666666666",
+      "name": "Generar resumen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, -120]
+    },
+    {
+      "parameters": {
+        "jsCode": "// RF-11: mensaje alternativo cuando el usuario no tiene tareas.\nreturn items.map((item) => ({\n  json: {\n    email: item.json.email,\n    subject: 'TaskFlow AI · Aun no tienes tareas esta semana',\n    html: `<div style=\"font-family:system-ui,sans-serif;max-width:560px;color:#1f2024\">\n  <h2>Sin tareas registradas</h2>\n  <p>No encontramos tareas en tu cuenta durante esta semana, por lo que no hay resumen que analizar.</p>\n  <p>Crea tu primera tarea en TaskFlow AI y la proxima semana recibiras prioridades y recomendaciones generadas con IA.</p>\n</div>`,\n  },\n}));"
+      },
+      "id": "77777777-7777-4777-8777-777777777777",
+      "name": "Mensaje alternativo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [540, 120]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.SMTP_FROM }}",
+        "toEmail": "={{ $json.email }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "88888888-8888-4888-8888-888888888888",
+      "name": "Enviar correo",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1000, 0],
+      "credentials": {
+        "smtp": { "id": "smtp-taskflow", "name": "SMTP TaskFlow AI" }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger semanal": {
+      "main": [[{ "node": "Consultar Supabase", "type": "main", "index": 0 }]]
+    },
+    "Consultar Supabase": {
+      "main": [[{ "node": "Procesar tareas", "type": "main", "index": 0 }]]
+    },
+    "Procesar tareas": {
+      "main": [[{ "node": "¿Tiene tareas?", "type": "main", "index": 0 }]]
+    },
+    "¿Tiene tareas?": {
+      "main": [
+        [{ "node": "Enviar a OpenAI", "type": "main", "index": 0 }],
+        [{ "node": "Mensaje alternativo", "type": "main", "index": 0 }]
+      ]
+    },
+    "Enviar a OpenAI": {
+      "main": [[{ "node": "Generar resumen", "type": "main", "index": 0 }]]
+    },
+    "Generar resumen": {
+      "main": [[{ "node": "Enviar correo", "type": "main", "index": 0 }]]
+    },
+    "Mensaje alternativo": {
+      "main": [[{ "node": "Enviar correo", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1", "saveExecutionProgress": true },
+  "pinData": {},
+  "active": false,
+  "versionId": "1",
+  "tags": [{ "name": "taskflow-ai" }]
+}
